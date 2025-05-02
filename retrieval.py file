@@ -1,0 +1,83 @@
+import numpy as np
+import faiss
+from typing import List, Dict, Tuple
+
+class RAGRetriever:
+    def __init__(self, embedding_model, index_path=None, top_k=5):
+        self.embedding_model = embedding_model
+        self.top_k = top_k
+        self.index = None
+        self.documents = []
+        
+        if index_path:
+            self.load_index(index_path)
+    
+    def build_index(self, documents: List[Dict]):
+        """Build FAISS index from document embeddings"""
+        self.documents = documents
+        document_texts = [doc["text"] for doc in documents]
+        embeddings = self.embedding_model.encode_batch(document_texts)
+        
+        # Convert to numpy array and normalize
+        embeddings_np = np.array(embeddings).astype('float32')
+        faiss.normalize_L2(embeddings_np)
+        
+        # Create FAISS index - using IndexFlatIP for inner product similarity
+        vector_dimension = embeddings_np.shape[1]
+        self.index = faiss.IndexFlatIP(vector_dimension)
+        self.index.add(embeddings_np)
+        
+        print(f"Built index with {len(documents)} documents")
+        
+    def save_index(self, path: str):
+        """Save FAISS index to disk"""
+        if self.index is None:
+            raise ValueError("Index has not been built yet")
+        
+        faiss.write_index(self.index, f"{path}/document_index.faiss")
+        
+        # Save document metadata separately
+        import json
+        with open(f"{path}/documents_metadata.json", 'w') as f:
+            json.dump(self.documents, f)
+    
+    def load_index(self, path: str):
+        """Load FAISS index from disk"""
+        self.index = faiss.read_index(f"{path}/document_index.faiss")
+        
+        # Load document metadata
+        import json
+        with open(f"{path}/documents_metadata.json", 'r') as f:
+            self.documents = json.load(f)
+    
+    def retrieve(self, query: str, filters: Dict = None) -> List[Dict]:
+        """Retrieve most relevant documents for a query"""
+        # Encode query
+        query_embedding = self.embedding_model.encode(query)
+        query_embedding = np.array([query_embedding]).astype('float32')
+        faiss.normalize_L2(query_embedding)
+        
+        # Search index
+        scores, indices = self.index.search(query_embedding, self.top_k)
+        
+        # Get matching documents with their scores
+        results = []
+        for i, idx in enumerate(indices[0]):
+            if idx != -1:  # Valid index
+                doc = self.documents[idx].copy()
+                doc["score"] = float(scores[0][i])
+                
+                # Apply filters if provided
+                if filters and not self._apply_filters(doc, filters):
+                    continue
+                    
+                results.append(doc)
+        
+        return results
+    
+    def _apply_filters(self, doc: Dict, filters: Dict) -> bool:
+        """Apply metadata filters to document"""
+        for key, value in filters.items():
+            if key not in doc or doc[key] != value:
+                return False
+        return True
